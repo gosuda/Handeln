@@ -28,6 +28,10 @@ func (r *mockResponse) Text() string {
 	return r.text
 }
 
+func (r *mockResponse) Thought() string {
+	return ""
+}
+
 func TestSession_Send(t *testing.T) {
 	mp := &mockProvider{}
 	s := NewSession(mp, "test-model")

@@ -25,8 +25,13 @@ type BlobPart struct {
 
 func (BlobPart) IsPart() {}
 
+type ThoughtPart string
+
+func (ThoughtPart) IsPart() {}
+
 type Response interface {
 	Text() string
+	Thought() string
 }
 
 type StreamResponse interface {

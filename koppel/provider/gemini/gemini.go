@@ -49,6 +49,8 @@ func (p *GeminiProvider) toGenAIContents(messages []provider.Message) []*genai.C
 					MIMEType: v.MIMEType,
 					Data:     v.Data,
 				}}
+			case provider.ThoughtPart:
+				genaiParts[j] = &genai.Part{Thought: true, Text: string(v)}
 			}
 		}
 		genaiContents[i] = &genai.Content{
@@ -69,9 +71,24 @@ func (r *geminiResponse) Text() string {
 	}
 	var text string
 	for _, part := range r.resp.Candidates[0].Content.Parts {
-		text += part.Text
+		if !part.Thought {
+			text += part.Text
+		}
 	}
 	return text
+}
+
+func (r *geminiResponse) Thought() string {
+	if r.resp == nil || len(r.resp.Candidates) == 0 || r.resp.Candidates[0].Content == nil {
+		return ""
+	}
+	var thought string
+	for _, part := range r.resp.Candidates[0].Content.Parts {
+		if part.Thought {
+			thought += part.Text
+		}
+	}
+	return thought
 }
 
 type geminiStreamResponse struct {

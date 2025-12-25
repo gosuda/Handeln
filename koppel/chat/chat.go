@@ -32,9 +32,12 @@ func (s *Session) Send(ctx context.Context, parts ...provider.Part) (provider.Re
 	}
 
 	modelMsg := provider.Message{
-		Role:  "model",
-		Parts: []provider.Part{provider.TextPart(resp.Text())},
+		Role: "model",
 	}
+	if thought := resp.Thought(); thought != "" {
+		modelMsg.Parts = append(modelMsg.Parts, provider.ThoughtPart(thought))
+	}
+	modelMsg.Parts = append(modelMsg.Parts, provider.TextPart(resp.Text()))
 	s.history = append(s.history, modelMsg)
 
 	return resp, nil
@@ -62,6 +65,7 @@ type chatStreamResponse struct {
 	session *Session
 	stream  provider.StreamResponse
 	text    string
+	thought string
 }
 
 func (r *chatStreamResponse) Next() (provider.Response, error) {
@@ -70,14 +74,18 @@ func (r *chatStreamResponse) Next() (provider.Response, error) {
 		if err.Error() == "no more stream items" {
 			// End of stream, save to history
 			modelMsg := provider.Message{
-				Role:  "model",
-				Parts: []provider.Part{provider.TextPart(r.text)},
+				Role: "model",
 			}
+			if r.thought != "" {
+				modelMsg.Parts = append(modelMsg.Parts, provider.ThoughtPart(r.thought))
+			}
+			modelMsg.Parts = append(modelMsg.Parts, provider.TextPart(r.text))
 			r.session.history = append(r.session.history, modelMsg)
 		}
 		return nil, err
 	}
 	r.text += resp.Text()
+	r.thought += resp.Thought()
 	return resp, nil
 }
 
@@ -85,6 +93,6 @@ func (r *chatStreamResponse) Close() error {
 	return r.stream.Close()
 }
 
-func (r *chatStreamResponse) Text() string {
-	return r.text
+func (r *chatStreamResponse) Thought() string {
+	return r.thought
 }
