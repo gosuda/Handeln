@@ -7,16 +7,19 @@ import (
 )
 
 type Session struct {
-	provider provider.Provider
-	model    string
-	history  []provider.Message
+	provider provider.Provider  `json:"-"`
+	Model    string             `json:"model"`
+	History  []provider.Message `json:"history"`
 }
 
-func NewSession(p provider.Provider, model string) *Session {
+func NewSession(model string) *Session {
 	return &Session{
-		provider: p,
-		model:    model,
+		Model: model,
 	}
+}
+
+func (s *Session) SetProvider(p provider.Provider) {
+	s.provider = p
 }
 
 func (s *Session) Send(ctx context.Context, parts ...provider.Part) (provider.Response, error) {
@@ -24,9 +27,9 @@ func (s *Session) Send(ctx context.Context, parts ...provider.Part) (provider.Re
 		Role:  "user",
 		Parts: parts,
 	}
-	s.history = append(s.history, msg)
+	s.History = append(s.History, msg)
 
-	resp, err := s.provider.GenerateContent(ctx, s.model, s.history)
+	resp, err := s.provider.GenerateContent(ctx, s.Model, s.History)
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +41,7 @@ func (s *Session) Send(ctx context.Context, parts ...provider.Part) (provider.Re
 		modelMsg.Parts = append(modelMsg.Parts, provider.ThoughtPart(thought))
 	}
 	modelMsg.Parts = append(modelMsg.Parts, provider.TextPart(resp.Text()))
-	s.history = append(s.history, modelMsg)
+	s.History = append(s.History, modelMsg)
 
 	return resp, nil
 }
@@ -48,9 +51,9 @@ func (s *Session) SendStream(ctx context.Context, parts ...provider.Part) (provi
 		Role:  "user",
 		Parts: parts,
 	}
-	s.history = append(s.history, msg)
+	s.History = append(s.History, msg)
 
-	stream, err := s.provider.GenerateContentStream(ctx, s.model, s.history)
+	stream, err := s.provider.GenerateContentStream(ctx, s.Model, s.History)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +83,7 @@ func (r *chatStreamResponse) Next() (provider.Response, error) {
 				modelMsg.Parts = append(modelMsg.Parts, provider.ThoughtPart(r.thought))
 			}
 			modelMsg.Parts = append(modelMsg.Parts, provider.TextPart(r.text))
-			r.session.history = append(r.session.history, modelMsg)
+			r.session.History = append(r.session.History, modelMsg)
 		}
 		return nil, err
 	}

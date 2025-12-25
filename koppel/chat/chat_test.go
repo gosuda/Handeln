@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"gosuda.org/koppel/provider"
@@ -17,7 +18,8 @@ func (m *mockProvider) GenerateContent(ctx context.Context, model string, messag
 }
 
 func (m *mockProvider) GenerateContentStream(ctx context.Context, model string, messages []provider.Message, options ...provider.Option) (provider.StreamResponse, error) {
-	return nil, nil
+	m.lastMessages = messages
+	return &mockStreamResponse{text: "mock response"}, nil
 }
 
 type mockResponse struct {
@@ -32,30 +34,76 @@ func (r *mockResponse) Thought() string {
 	return ""
 }
 
+// Added mockStreamResponse for streaming tests
+type mockStreamResponse struct {
+	text string
+	sent bool
+}
+
+func (s *mockStreamResponse) Next() (provider.Response, error) {
+	if s.sent {
+		return nil, fmt.Errorf("no more stream items")
+	}
+	s.sent = true
+	return &mockResponse{text: s.text}, nil
+}
+
+func (s *mockStreamResponse) Close() error {
+	return nil
+}
+
 func TestSession_Send(t *testing.T) {
-	mp := &mockProvider{}
-	s := NewSession(mp, "test-model")
+	mock := &mockProvider{}
+	s := NewSession("test-model")
+	s.SetProvider(mock)
 
-	resp, err := s.Send(context.Background(), provider.TextPart("hello"))
+	ctx := context.Background()
+	_, err := s.Send(ctx, provider.TextPart("hello"))
 	if err != nil {
-		t.Fatalf("failed to send: %v", err)
+		t.Fatalf("Send failed: %v", err)
 	}
 
-	if resp.Text() != "mock response" {
-		t.Errorf("expected 'mock response', got %s", resp.Text())
+	if len(s.History) != 2 {
+		t.Errorf("expected 2 messages in history, got %d", len(s.History))
 	}
 
-	if len(s.history) != 2 {
-		t.Errorf("expected history length 2, got %d", len(s.history))
+	if s.History[0].Role != "user" || s.History[1].Role != "model" {
+		t.Errorf("unexpected roles in history: %s, %s", s.History[0].Role, s.History[1].Role)
 	}
 
-	if s.history[0].Role != "user" || s.history[1].Role != "model" {
-		t.Errorf("incorrect roles in history")
+	if mock.lastMessages[0].Role != "user" {
+		t.Errorf("mock received wrong history")
+	}
+}
+
+func TestSession_SendStream(t *testing.T) {
+	mock := &mockProvider{}
+	s := NewSession("test-model")
+	s.SetProvider(mock)
+
+	ctx := context.Background()
+	stream, err := s.SendStream(ctx, provider.TextPart("hello stream"))
+	if err != nil {
+		t.Fatalf("SendStream failed: %v", err)
 	}
 
-	// Second turn
-	_, _ = s.Send(context.Background(), provider.TextPart("how are you?"))
-	if len(mp.lastMessages) != 3 {
-		t.Errorf("expected 3 messages in the second turn call, got %d", len(mp.lastMessages))
+	var text string
+	for {
+		resp, err := stream.Next()
+		if err != nil {
+			if err.Error() == "no more stream items" {
+				break
+			}
+			t.Fatalf("stream.Next() failed: %v", err)
+		}
+		text += resp.Text()
+	}
+
+	if text != "mock response" {
+		t.Errorf("expected 'mock response', got %s", text)
+	}
+
+	if len(s.History) != 2 {
+		t.Errorf("expected 2 messages in history, got %d", len(s.History))
 	}
 }

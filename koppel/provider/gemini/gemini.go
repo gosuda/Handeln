@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"time"
 
 	"google.golang.org/genai"
 	"gosuda.org/koppel/provider"
@@ -22,8 +23,20 @@ func NewProvider(ctx context.Context, config *genai.ClientConfig) (*GeminiProvid
 }
 
 func (p *GeminiProvider) GenerateContent(ctx context.Context, model string, messages []provider.Message, options ...provider.Option) (provider.Response, error) {
-	genaiContents := p.toGenAIContents(messages)
-	resp, err := p.client.Models.GenerateContent(ctx, model, genaiContents, nil)
+	opts := &provider.Options{}
+	for _, o := range options {
+		if err := o(opts); err != nil {
+			return nil, err
+		}
+	}
+
+	config := &genai.GenerateContentConfig{}
+	if opts.CacheName != "" {
+		config.CachedContent = opts.CacheName
+	}
+
+	contents := p.toGenAIContents(messages)
+	resp, err := p.client.Models.GenerateContent(ctx, model, contents, config)
 	if err != nil {
 		return nil, err
 	}
@@ -31,9 +44,74 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, model string, mess
 }
 
 func (p *GeminiProvider) GenerateContentStream(ctx context.Context, model string, messages []provider.Message, options ...provider.Option) (provider.StreamResponse, error) {
-	genaiContents := p.toGenAIContents(messages)
-	stream := p.client.Models.GenerateContentStream(ctx, model, genaiContents, nil)
-	return &geminiStreamResponse{stream: stream}, nil
+	opts := &provider.Options{}
+	for _, o := range options {
+		if err := o(opts); err != nil {
+			return nil, err
+		}
+	}
+
+	config := &genai.GenerateContentConfig{}
+	if opts.CacheName != "" {
+		config.CachedContent = opts.CacheName
+	}
+
+	contents := p.toGenAIContents(messages)
+	it := p.client.Models.GenerateContentStream(ctx, model, contents, config)
+	next, stop := iter.Pull2(it)
+	return &geminiStreamResponse{next: next, stop: stop}, nil
+}
+
+// ProviderContextCacher implementation
+
+func (p *GeminiProvider) CreateCache(ctx context.Context, model string, messages []provider.Message, displayName string, ttl time.Duration) (*provider.ContextCache, error) {
+	config := &genai.CreateCachedContentConfig{
+		DisplayName: displayName,
+		Contents:    p.toGenAIContents(messages),
+		TTL:         ttl,
+	}
+	cached, err := p.client.Caches.Create(ctx, model, config)
+	if err != nil {
+		return nil, err
+	}
+	return p.fromGenAICachedContent(cached), nil
+}
+
+func (p *GeminiProvider) GetCache(ctx context.Context, name string) (*provider.ContextCache, error) {
+	cached, err := p.client.Caches.Get(ctx, name, nil)
+	if err != nil {
+		return nil, err
+	}
+	return p.fromGenAICachedContent(cached), nil
+}
+
+func (p *GeminiProvider) DeleteCache(ctx context.Context, name string) error {
+	_, err := p.client.Caches.Delete(ctx, name, nil)
+	return err
+}
+
+func (p *GeminiProvider) ListCaches(ctx context.Context) ([]*provider.ContextCache, error) {
+	var caches []*provider.ContextCache
+	all := p.client.Caches.All(ctx)
+	for cached, err := range all {
+		if err != nil {
+			return nil, err
+		}
+		caches = append(caches, p.fromGenAICachedContent(cached))
+	}
+	return caches, nil
+}
+
+func (p *GeminiProvider) fromGenAICachedContent(cached *genai.CachedContent) *provider.ContextCache {
+	if cached == nil {
+		return nil
+	}
+	return &provider.ContextCache{
+		Name:        cached.Name,
+		DisplayName: cached.DisplayName,
+		Model:       cached.Model,
+		ExpireTime:  cached.ExpireTime,
+	}
 }
 
 func (p *GeminiProvider) toGenAIContents(messages []provider.Message) []*genai.Content {
@@ -92,15 +170,11 @@ func (r *geminiResponse) Thought() string {
 }
 
 type geminiStreamResponse struct {
-	stream iter.Seq2[*genai.GenerateContentResponse, error]
-	next   func() (*genai.GenerateContentResponse, error, bool)
-	stop   func()
+	next func() (*genai.GenerateContentResponse, error, bool)
+	stop func()
 }
 
 func (s *geminiStreamResponse) Next() (provider.Response, error) {
-	if s.next == nil {
-		s.next, s.stop = iter.Pull2(s.stream)
-	}
 	resp, err, ok := s.next()
 	if !ok {
 		return nil, fmt.Errorf("no more stream items")
