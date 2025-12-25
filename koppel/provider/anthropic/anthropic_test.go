@@ -29,7 +29,8 @@ func TestToMessageParams(t *testing.T) {
 		},
 	}
 
-	params := p.toMessageParams("claude-3-5-sonnet-20240620", messages)
+	params := p.toMessageParams("claude-3-5-sonnet-20240620", messages, provider.Options{})
+
 	if params.Model != "claude-3-5-sonnet-20240620" {
 		t.Errorf("expected model claude-3-5-sonnet-20240620, got %s", params.Model)
 	}

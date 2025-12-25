@@ -6,13 +6,26 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"gosuda.org/koppel/tool"
 )
 
 type Options struct {
-	CacheName string `json:"cache_name,omitempty"`
+	CacheName string            `json:"cache_name,omitempty"`
+	Tools     []tool.Definition `json:"tools,omitempty"`
 }
 
 type Option func(*Options) error
+
+func NewOptions(options ...Option) (Options, error) {
+	var opts Options
+	for _, o := range options {
+		if err := o(&opts); err != nil {
+			return opts, err
+		}
+	}
+	return opts, nil
+}
 
 type Part interface {
 	IsPart()
@@ -33,9 +46,26 @@ type ThoughtPart string
 
 func (ThoughtPart) IsPart() {}
 
+type ToolCallPart struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+func (ToolCallPart) IsPart() {}
+
+type ToolResultPart struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+func (ToolResultPart) IsPart() {}
+
 type Response interface {
 	Text() string
 	Thought() string
+	ToolCalls() []ToolCallPart
 }
 
 type StreamResponse interface {
@@ -49,12 +79,15 @@ type Message struct {
 }
 
 type partJSON struct {
-	Type     string      `json:"type"`
-	Text     string      `json:"text,omitempty"`
-	MIMEType string      `json:"mime_type,omitempty"`
-	Data     []byte      `json:"data,omitempty"`
-	Thought  string      `json:"thought,omitempty"`
-	Content  interface{} `json:"content,omitempty"`
+	Type      string      `json:"type"`
+	Text      string      `json:"text,omitempty"`
+	MIMEType  string      `json:"mime_type,omitempty"`
+	Data      []byte      `json:"data,omitempty"`
+	Thought   string      `json:"thought,omitempty"`
+	ID        string      `json:"id,omitempty"`
+	Name      string      `json:"name,omitempty"`
+	Arguments string      `json:"arguments,omitempty"`
+	Content   interface{} `json:"content,omitempty"`
 }
 
 func (m *Message) UnmarshalJSON(data []byte) error {
@@ -78,6 +111,19 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 			m.Parts[i] = BlobPart{MIMEType: p.MIMEType, Data: p.Data}
 		case "thought":
 			m.Parts[i] = ThoughtPart(p.Thought)
+		case "tool_call":
+			m.Parts[i] = ToolCallPart{ID: p.ID, Name: p.Name, Arguments: p.Arguments}
+		case "tool_result":
+			// Content in partJSON is interface{}, but ToolResultPart expects string.
+			// Re-marshal and unmarshal or just cast if it's string.
+			content := ""
+			if s, ok := p.Content.(string); ok {
+				content = s
+			} else if p.Content != nil {
+				b, _ := json.Marshal(p.Content)
+				content = string(b)
+			}
+			m.Parts[i] = ToolResultPart{ID: p.ID, Name: p.Name, Content: content}
 		default:
 			return fmt.Errorf("unknown part type: %s", p.Type)
 		}
@@ -96,6 +142,10 @@ func (m Message) MarshalJSON() ([]byte, error) {
 			parts[i] = partJSON{Type: "blob", MIMEType: v.MIMEType, Data: v.Data}
 		case ThoughtPart:
 			parts[i] = partJSON{Type: "thought", Thought: string(v)}
+		case ToolCallPart:
+			parts[i] = partJSON{Type: "tool_call", ID: v.ID, Name: v.Name, Arguments: v.Arguments}
+		case ToolResultPart:
+			parts[i] = partJSON{Type: "tool_result", ID: v.ID, Name: v.Name, Content: v.Content}
 		}
 	}
 

@@ -3,25 +3,32 @@ package anthropic
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
+	"github.com/anthropics/anthropic-sdk-go/shared/constant"
 	"gosuda.org/koppel/provider"
 )
 
 type AnthropicProvider struct {
-	client anthropic.Client
+	client *anthropic.Client
 }
 
 func NewProvider(ctx context.Context, options ...option.RequestOption) (*AnthropicProvider, error) {
 	client := anthropic.NewClient(options...)
-	return &AnthropicProvider{client: client}, nil
+	return &AnthropicProvider{client: &client}, nil
 }
 
 func (p *AnthropicProvider) GenerateContent(ctx context.Context, model string, messages []provider.Message, options ...provider.Option) (provider.Response, error) {
-	params := p.toMessageParams(model, messages)
+	opts, err := provider.NewOptions(options...)
+	if err != nil {
+		return nil, err
+	}
+	params := p.toMessageParams(model, messages, opts)
 	resp, err := p.client.Messages.New(ctx, params)
 	if err != nil {
 		return nil, err
@@ -30,12 +37,16 @@ func (p *AnthropicProvider) GenerateContent(ctx context.Context, model string, m
 }
 
 func (p *AnthropicProvider) GenerateContentStream(ctx context.Context, model string, messages []provider.Message, options ...provider.Option) (provider.StreamResponse, error) {
-	params := p.toMessageParams(model, messages)
+	opts, err := provider.NewOptions(options...)
+	if err != nil {
+		return nil, err
+	}
+	params := p.toMessageParams(model, messages, opts)
 	stream := p.client.Messages.NewStreaming(ctx, params)
 	return &anthropicStreamResponse{stream: stream}, nil
 }
 
-func (p *AnthropicProvider) toMessageParams(model string, messages []provider.Message) anthropic.MessageNewParams {
+func (p *AnthropicProvider) toMessageParams(model string, messages []provider.Message, opts provider.Options) anthropic.MessageNewParams {
 	var system []anthropic.TextBlockParam
 	var anthropicMessages []anthropic.MessageParam
 
@@ -60,8 +71,13 @@ func (p *AnthropicProvider) toMessageParams(model string, messages []provider.Me
 				encoded := base64.StdEncoding.EncodeToString(v.Data)
 				blocks = append(blocks, anthropic.NewImageBlockBase64(v.MIMEType, encoded))
 			case provider.ThoughtPart:
-				// For now, signature is empty for input.
 				blocks = append(blocks, anthropic.NewThinkingBlock("", string(v)))
+			case provider.ToolCallPart:
+				var input any
+				json.Unmarshal([]byte(v.Arguments), &input)
+				blocks = append(blocks, anthropic.NewToolUseBlock(v.ID, input, v.Name))
+			case provider.ToolResultPart:
+				blocks = append(blocks, anthropic.NewToolResultBlock(v.ID, v.Content, false))
 			}
 		}
 
@@ -79,10 +95,40 @@ func (p *AnthropicProvider) toMessageParams(model string, messages []provider.Me
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(model),
 		Messages:  anthropicMessages,
-		MaxTokens: int64(4096), // Default reasonable max tokens
+		MaxTokens: int64(4096),
 	}
 	if len(system) > 0 {
 		params.System = system
+	}
+
+	if len(opts.Tools) > 0 {
+		tools := make([]anthropic.ToolUnionParam, len(opts.Tools))
+		for i, t := range opts.Tools {
+			schema := anthropic.ToolInputSchemaParam{
+				Type: constant.Object("object"),
+			}
+			if m, ok := t.InputSchema.(map[string]interface{}); ok {
+				schema.Properties = m["properties"]
+				if req, ok := m["required"].([]interface{}); ok {
+					sReq := make([]string, len(req))
+					for j, r := range req {
+						if str, ok := r.(string); ok {
+							sReq[j] = str
+						}
+					}
+					schema.Required = sReq
+				}
+			}
+
+			tools[i] = anthropic.ToolUnionParam{
+				OfTool: &anthropic.ToolParam{
+					Name:        t.Name,
+					Description: param.NewOpt(t.Description),
+					InputSchema: schema,
+				},
+			}
+		}
+		params.Tools = tools
 	}
 
 	return params
@@ -110,6 +156,21 @@ func (r *anthropicResponse) Thought() string {
 		}
 	}
 	return thought
+}
+
+func (r *anthropicResponse) ToolCalls() []provider.ToolCallPart {
+	var calls []provider.ToolCallPart
+	for _, block := range r.resp.Content {
+		if block.Type == "tool_use" {
+			b, _ := json.Marshal(block.Input)
+			calls = append(calls, provider.ToolCallPart{
+				ID:        block.ID,
+				Name:      block.Name,
+				Arguments: string(b),
+			})
+		}
+	}
+	return calls
 }
 
 type anthropicStreamResponse struct {
@@ -151,4 +212,20 @@ func (r *anthropicEventResponse) Thought() string {
 		}
 	}
 	return ""
+}
+
+func (r *anthropicEventResponse) ToolCalls() []provider.ToolCallPart {
+	if r.event.Type == "content_block_start" {
+		if r.event.ContentBlock.Type == "tool_use" {
+			b, _ := json.Marshal(r.event.ContentBlock.Input)
+			return []provider.ToolCallPart{
+				{
+					ID:        r.event.ContentBlock.ID,
+					Name:      r.event.ContentBlock.Name,
+					Arguments: string(b),
+				},
+			}
+		}
+	}
+	return nil
 }

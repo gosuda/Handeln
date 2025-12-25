@@ -34,6 +34,10 @@ func (r *mockResponse) Thought() string {
 	return ""
 }
 
+func (r *mockResponse) ToolCalls() []provider.ToolCallPart {
+	return nil
+}
+
 // Added mockStreamResponse for streaming tests
 type mockStreamResponse struct {
 	text string

@@ -2,9 +2,9 @@ package gemini
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
-	"time"
 
 	"google.golang.org/genai"
 	"gosuda.org/koppel/provider"
@@ -34,6 +34,21 @@ func (p *GeminiProvider) GenerateContent(ctx context.Context, model string, mess
 	if opts.CacheName != "" {
 		config.CachedContent = opts.CacheName
 	}
+	if len(opts.Tools) > 0 {
+		genaiTools := make([]*genai.Tool, len(opts.Tools))
+		for i, t := range opts.Tools {
+			genaiTools[i] = &genai.Tool{
+				FunctionDeclarations: []*genai.FunctionDeclaration{
+					{
+						Name:        t.Name,
+						Description: t.Description,
+						Parameters:  p.toGenAISchema(t.InputSchema),
+					},
+				},
+			}
+		}
+		config.Tools = genaiTools
+	}
 
 	contents := p.toGenAIContents(messages)
 	resp, err := p.client.Models.GenerateContent(ctx, model, contents, config)
@@ -55,6 +70,21 @@ func (p *GeminiProvider) GenerateContentStream(ctx context.Context, model string
 	if opts.CacheName != "" {
 		config.CachedContent = opts.CacheName
 	}
+	if len(opts.Tools) > 0 {
+		genaiTools := make([]*genai.Tool, len(opts.Tools))
+		for i, t := range opts.Tools {
+			genaiTools[i] = &genai.Tool{
+				FunctionDeclarations: []*genai.FunctionDeclaration{
+					{
+						Name:        t.Name,
+						Description: t.Description,
+						Parameters:  p.toGenAISchema(t.InputSchema),
+					},
+				},
+			}
+		}
+		config.Tools = genaiTools
+	}
 
 	contents := p.toGenAIContents(messages)
 	it := p.client.Models.GenerateContentStream(ctx, model, contents, config)
@@ -62,56 +92,16 @@ func (p *GeminiProvider) GenerateContentStream(ctx context.Context, model string
 	return &geminiStreamResponse{next: next, stop: stop}, nil
 }
 
-// ProviderContextCacher implementation
+// ... (ContextCacher methods)
 
-func (p *GeminiProvider) CreateCache(ctx context.Context, model string, messages []provider.Message, displayName string, ttl time.Duration) (*provider.ContextCache, error) {
-	config := &genai.CreateCachedContentConfig{
-		DisplayName: displayName,
-		Contents:    p.toGenAIContents(messages),
-		TTL:         ttl,
-	}
-	cached, err := p.client.Caches.Create(ctx, model, config)
-	if err != nil {
-		return nil, err
-	}
-	return p.fromGenAICachedContent(cached), nil
-}
-
-func (p *GeminiProvider) GetCache(ctx context.Context, name string) (*provider.ContextCache, error) {
-	cached, err := p.client.Caches.Get(ctx, name, nil)
-	if err != nil {
-		return nil, err
-	}
-	return p.fromGenAICachedContent(cached), nil
-}
-
-func (p *GeminiProvider) DeleteCache(ctx context.Context, name string) error {
-	_, err := p.client.Caches.Delete(ctx, name, nil)
-	return err
-}
-
-func (p *GeminiProvider) ListCaches(ctx context.Context) ([]*provider.ContextCache, error) {
-	var caches []*provider.ContextCache
-	all := p.client.Caches.All(ctx)
-	for cached, err := range all {
-		if err != nil {
-			return nil, err
-		}
-		caches = append(caches, p.fromGenAICachedContent(cached))
-	}
-	return caches, nil
-}
-
-func (p *GeminiProvider) fromGenAICachedContent(cached *genai.CachedContent) *provider.ContextCache {
-	if cached == nil {
+func (p *GeminiProvider) toGenAISchema(schema interface{}) *genai.Schema {
+	if schema == nil {
 		return nil
 	}
-	return &provider.ContextCache{
-		Name:        cached.Name,
-		DisplayName: cached.DisplayName,
-		Model:       cached.Model,
-		ExpireTime:  cached.ExpireTime,
-	}
+	b, _ := json.Marshal(schema)
+	var s genai.Schema
+	json.Unmarshal(b, &s)
+	return &s
 }
 
 func (p *GeminiProvider) toGenAIContents(messages []provider.Message) []*genai.Content {
@@ -129,10 +119,31 @@ func (p *GeminiProvider) toGenAIContents(messages []provider.Message) []*genai.C
 				}}
 			case provider.ThoughtPart:
 				genaiParts[j] = &genai.Part{Thought: true, Text: string(v)}
+			case provider.ToolCallPart:
+				var args map[string]interface{}
+				json.Unmarshal([]byte(v.Arguments), &args)
+				genaiParts[j] = &genai.Part{FunctionCall: &genai.FunctionCall{
+					Name: v.Name,
+					Args: args,
+				}}
+			case provider.ToolResultPart:
+				var response map[string]interface{}
+				if err := json.Unmarshal([]byte(v.Content), &response); err != nil {
+					response = map[string]interface{}{"result": v.Content}
+				}
+				genaiParts[j] = &genai.Part{FunctionResponse: &genai.FunctionResponse{
+					Name:     v.Name,
+					Response: response,
+				}}
 			}
 		}
+		// In Gemini, ToolResultPart must have role "user" or "function"
+		role := msg.Role
+		if role == "tool" {
+			role = "function"
+		}
 		genaiContents[i] = &genai.Content{
-			Role:  msg.Role,
+			Role:  role,
 			Parts: genaiParts,
 		}
 	}
@@ -149,7 +160,7 @@ func (r *geminiResponse) Text() string {
 	}
 	var text string
 	for _, part := range r.resp.Candidates[0].Content.Parts {
-		if !part.Thought {
+		if !part.Thought && part.Text != "" {
 			text += part.Text
 		}
 	}
@@ -167,6 +178,23 @@ func (r *geminiResponse) Thought() string {
 		}
 	}
 	return thought
+}
+
+func (r *geminiResponse) ToolCalls() []provider.ToolCallPart {
+	if r.resp == nil || len(r.resp.Candidates) == 0 || r.resp.Candidates[0].Content == nil {
+		return nil
+	}
+	var calls []provider.ToolCallPart
+	for _, part := range r.resp.Candidates[0].Content.Parts {
+		if part.FunctionCall != nil {
+			args, _ := json.Marshal(part.FunctionCall.Args)
+			calls = append(calls, provider.ToolCallPart{
+				Name:      part.FunctionCall.Name,
+				Arguments: string(args),
+			})
+		}
+	}
+	return calls
 }
 
 type geminiStreamResponse struct {
